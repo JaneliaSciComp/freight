@@ -1,4 +1,5 @@
 click 
+colorlog
 dask
 pathlib
 s3fs
