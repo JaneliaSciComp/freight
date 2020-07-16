@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+import sys
 from time import time
 from typing import Sequence, Optional, Tuple, List
 import click
@@ -35,16 +36,21 @@ def humansize(num: int, suffix='B') -> str:
         num /= 1024.0
     return "%.1f%s%s" % (num, 'P', suffix)
 
+
 def iterput(sources: Sequence[str], dests: Sequence[str], tags: Sequence[Optional[dict]]):
     """
     Given a sequence of sources, dests, and tags, save each source to dest with a tag.
     """
     fs = s3fs.S3FileSystem(anon=False)
-    for source, dest, tag in zip(sources, dests, tags):
-        fs.put(source, dest)
-        if tag is not None:
+    if tags:
+        for source, dest, tag in zip(sources, dests, tags):
+            fs.put(source, dest)
             fs.put_tags(dest, tag)
+    else:
+        for source, dest in zip(sources, dests):
+            fs.put(source, dest)
     return True
+
 
 def s3put(dest_root: str, source_path: str, dryrun: bool, endswith: Optional[str] = '', tags: Optional[dict] = None, **kwargs):
     sources, considered, total_size = fwalk(source_path, endswith)
@@ -59,23 +65,26 @@ def s3put(dest_root: str, source_path: str, dryrun: bool, endswith: Optional[str
 
     source_bag = bag.from_sequence(sources)
     dest_bag = bag.from_sequence(dests)
-    tag_bag = bag.from_sequence((tags,) * len(sources))
+    tag_bag = bag.from_sequence((tags,) * len(sources)) if len(tags) else None
 
     return bag.map_partitions(iterput, source_bag, dest_bag, tag_bag), len(sources), total_size
+
 
 @click.command()
 @click.argument('source_paths', required=True, nargs=-1)
 @click.option('-b', '--bucket', required=True, type=str)
 @click.option('-w', '--workers', default=8, type=int)
 @click.option('-ew', '--endswith', default='', type=str)
-@click.option('-vt', '--version-tag', required=True, type=str)
-@click.option('-st', '--stage-tag', required=True, type=str)
-@click.option('-dvt', '--developer-tag', required=True, type=str)
-@click.option('-pt', '--project-tag', required=True, type=str)
-@click.option('-dt', '--description-tag', required=True, type=str)
+@click.option('-vt', '--version-tag', default=None, type=str)
+@click.option('-st', '--stage-tag', default=None, type=str)
+@click.option('-dvt', '--developer-tag', default=None, type=str)
+@click.option('-pt', '--project-tag', default=None, type=str)
+@click.option('-dt', '--description-tag', default=None, type=str)
 @click.option('-dr', '--dryrun', default=False, is_flag=True)
 @click.option('-vb', '--verbose', default=False, is_flag=True)
 @click.option('-db', '--debug', default=False, is_flag=True)
+
+
 def s3put_cli(source_paths, bucket, workers, endswith, version_tag, stage_tag, developer_tag, project_tag, description_tag, dryrun, verbose, debug):
     LOGGER = colorlog.getLogger()
     if debug:
@@ -91,16 +100,16 @@ def s3put_cli(source_paths, bucket, workers, endswith, version_tag, stage_tag, d
     LOGGER.addHandler(HANDLER)
 
     total = {'count': 0, 'size': 0, 'time': 0}
+    tags = dict()
+    if stage_tag:
+        assert stage_tag in STAGES
+    for tag in ['description', 'developer', 'project', 'stage', 'version']:
+        if locals()[tag + '_tag']:
+            tags[tag + '_tag'] = locals()[tag + '_tag']
     for source_path in source_paths:
         if len(source_paths) > 1:
             print("Source " + source_path)
         dest_root = Path(bucket) / Path(source_path).stem
-        assert stage_tag in STAGES
-        tags = {'VERSION': version_tag,
-                'DEVELOPER': developer_tag,
-                'STAGE': stage_tag,
-                'PROJECT': project_tag,
-                'DESCRIPTION': description_tag}
         result, source_count, source_size = s3put(dest_root, source_path, endswith=endswith, tags=tags, dryrun=dryrun)
         total['count'] += source_count
         total['size'] += source_size
@@ -116,6 +125,9 @@ def s3put_cli(source_paths, bucket, workers, endswith, version_tag, stage_tag, d
             print("Data transfer rate: %.2f MB/sec" % (total['size'] / total['time'] / (1024 * 1024)))
 
 if __name__ == '__main__':
+    if not (sys.version_info[0] == 3 and sys.version_info[1] >= 6):
+        print("This program requires at least Python 3.6")
+        sys.exit(-1)
     pbar = ProgressBar()
     pbar.register()
     s3put_cli()
