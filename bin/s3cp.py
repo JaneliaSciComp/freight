@@ -12,6 +12,7 @@ import s3fs
 
 
 STAGES = ('dev', 'prod', 'val')
+TEMPLATE = "An exception of type {0} occurred. Arguments:\n{1!r}"
 
 def fwalk(source: str, endswith='') -> Tuple[List[str], int, int]:
     """
@@ -44,11 +45,21 @@ def iterput(sources: Sequence[str], dests: Sequence[str], tags: Sequence[Optiona
     fs = s3fs.S3FileSystem(anon=False)
     if tags:
         for source, dest, tag in zip(sources, dests, tags):
-            fs.put(source, dest)
-            fs.put_tags(dest, tag)
+            try:
+                fs.put(source, dest)
+                fs.put_tags(dest, tag)
+            except Exception as err:
+                print(TEMPLATE.format(type(err).__name__, err.args))
+                print("Could not process %s" % dest)
+                sys.exit(-1)
     else:
         for source, dest in zip(sources, dests):
-            fs.put(source, dest)
+            try:
+                fs.put(source, dest)
+            except Exception as err:
+                print(TEMPLATE.format(type(err).__name__, err.args))
+                print("Could not process %s" % dest)
+                sys.exit(-1)
     return True
 
 
