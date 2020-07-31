@@ -5,8 +5,7 @@ import datetime
 import boto3
 
 METRICLIST = [('BucketSizeBytes', 'StandardStorage'),
-              ('NumberOfObjects', 'AllStorageTypes'),
-             ]
+              ('NumberOfObjects', 'AllStorageTypes')]
 
 def humansize(num, suffix='B'):
     ''' Return a human-readable storage size
@@ -54,8 +53,7 @@ def bucket_stats(name, date):
             Period=86400,
             Statistics=[ARG.METRIC],
             Dimensions=[{'Name': 'BucketName', 'Value': name},
-                        {'Name': 'StorageType', 'Value': storage_type}],
-        )
+                        {'Name': 'StorageType', 'Value': storage_type}])
         if metrics['Datapoints']:
             results[metric_name] = sorted(metrics['Datapoints'],
                                           key=lambda row: row['Timestamp'])[-1][ARG.METRIC]
@@ -74,12 +72,15 @@ def process_buckets():
     s3r = boto3.resource('s3')
     total = {"size": 0, "count": 0}
     for bucket in s3r.buckets.all():
+        if ARG.BUCKET and ARG.BUCKET != bucket.name:
+            continue
         results = bucket_stats(bucket.name, midnight)
         total['size'] += int(results.get('BucketSizeBytes', 0))
         total['count'] += int(results.get('NumberOfObjects', 0))
         print(bucket.name, humansize(int(results.get('BucketSizeBytes', 0))),
               int(results.get('NumberOfObjects', 0)), sep='\t')
-    print('TOTAL', humansize(total['size']), total['count'], sep='\t')
+    if not ARG.BUCKET:
+        print('TOTAL', humansize(total['size']), total['count'], sep='\t')
 
 
 if __name__ == '__main__':
@@ -87,6 +88,8 @@ if __name__ == '__main__':
         description="Get bucket stats for a profile")
     PARSER.add_argument('--region', dest='REGION', action='store',
                         default='us-east-1', help='AWS region [us-east-1]')
+    PARSER.add_argument('--bucket', dest='BUCKET', action='store',
+                        help='S3 bucket')
     PARSER.add_argument('--metric', dest='METRIC', action='store',
                         default='Maximum', help='S3 metric [Maximum]')
     PARSER.add_argument('--profile', dest='PROFILE', action='store',
