@@ -58,6 +58,7 @@ def bucket_stats(name, date):
             results[metric_name] = sorted(metrics['Datapoints'],
                                           key=lambda row: row['Timestamp'])[-1][ARG.METRIC]
             continue
+        print("No datapoints fround for bucket %s" % name)
     return results
 
 
@@ -71,14 +72,21 @@ def process_buckets():
     midnight = datetime.datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
     s3r = boto3.resource('s3')
     total = {"size": 0, "count": 0}
+    found = False
     for bucket in s3r.buckets.all():
         if ARG.BUCKET and ARG.BUCKET != bucket.name:
             continue
+        found = True
         results = bucket_stats(bucket.name, midnight)
         total['size'] += int(results.get('BucketSizeBytes', 0))
         total['count'] += int(results.get('NumberOfObjects', 0))
         print(bucket.name, humansize(int(results.get('BucketSizeBytes', 0))),
               int(results.get('NumberOfObjects', 0)), sep='\t')
+    if not found:
+        if ARG.BUCKET:
+            print("Bucket %s was not found" % ARG.BUCKET)
+        else:
+            print("No buckets were found")
     if not ARG.BUCKET:
         print('TOTAL', humansize(total['size']), total['count'], sep='\t')
 
