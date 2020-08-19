@@ -1,7 +1,8 @@
+import mimetypes
 import os
 from pathlib import Path
 import sys
-from time import time
+from time import sleep, time
 from typing import Sequence, Optional, Tuple, List
 import click
 import colorlog
@@ -41,6 +42,36 @@ def humansize(num: int, suffix='B') -> str:
     return "%.1f%s%s" % (num, 'P', suffix)
 
 
+def upload_single_file(fs, source, dest, tag=None):
+    try:
+        fs.put(source, dest)
+    except Exception as err:
+        print(TEMPLATE.format(type(err).__name__, err.args))
+        print("Could not put %s" % dest)
+        sys.exit(-1)
+    added = False
+    tries = 5
+    while added is False and tries:
+        try:
+            fs.setxattr(dest, copy_kwargs={'ContentType': mimetypes.guess_type(source)[0]})
+            added = True
+        except Exception as err:
+            print("Will retry setxattr for %s" % dest)
+            tries -= 1
+            sleep(2)
+    if not added:
+        print("Could not setxattr for %s" % dest)
+        sys.exit(-1)
+    if not tag:
+        return
+    try:
+        fs.put_tags(dest, tag)
+    except Exception as err:
+        print(TEMPLATE.format(type(err).__name__, err.args))
+        print("Could not put_tags %s" % dest)
+        sys.exit(-1)
+
+
 def iterput(sources: Sequence[str], dests: Sequence[str], tags: Sequence[Optional[dict]], profile):
     """
     Given a sequence of sources, dests, and tags, save each source to dest with a tag.
@@ -55,21 +86,10 @@ def iterput(sources: Sequence[str], dests: Sequence[str], tags: Sequence[Optiona
         sys.exit(-1)
     if tags:
         for source, dest, tag in zip(sources, dests, tags):
-            try:
-                fs.put(source, dest)
-                fs.put_tags(dest, tag)
-            except Exception as err:
-                print(TEMPLATE.format(type(err).__name__, err.args))
-                print("Could not process %s" % dest)
-                sys.exit(-1)
+            upload_single_file(fs, source, dest, tag)
     else:
         for source, dest in zip(sources, dests):
-            try:
-                fs.put(source, dest)
-            except Exception as err:
-                print(TEMPLATE.format(type(err).__name__, err.args))
-                print("Could not process %s" % dest)
-                sys.exit(-1)
+            upload_single_file(fs, source, dest)
     return True
 
 
@@ -84,18 +104,41 @@ def s3put(dest_root: str, source_path: str, dryrun: bool, profile: Optional[str]
     if dryrun:
         return None, len(sources), total_size
     dests = tuple(dest_root / Path(f).relative_to(source_path) for f in sources)
-
     source_bag = bag.from_sequence(sources)
     dest_bag = bag.from_sequence(dests)
     tag_bag = bag.from_sequence((tags,) * len(sources)) if tags else None
+    return bag.map_partitions(iterput, source_bag, dest_bag, tag_bag, profile), \
+                              len(sources), total_size
 
+
+def s3put_order (order_file: str, dryrun: bool, profile: Optional[str] = None,
+                 tags: Optional[dict] = None, **kwargs):
+    sources = []
+    dests = []
+    order = open(order_file, "r")
+    total_size = 0
+    for line in order.readlines():
+        line = line.rstrip()
+        src, dst = line.split("\t")
+        total_size += os.stat(src).st_size
+        sources.append(src)
+        dests.append(dst)
+    order.close()
+    print("Files selected: %d" % (len(sources)))
+    print("Size: %s" % humansize(total_size))
+    if dryrun:
+        return None, len(sources), total_size
+    source_bag = bag.from_sequence(sources)
+    dest_bag = bag.from_sequence(dests)
+    tag_bag = bag.from_sequence((tags,) * len(sources)) if tags else None
     return bag.map_partitions(iterput, source_bag, dest_bag, tag_bag, profile), \
                               len(sources), total_size
 
 
 @click.command()
-@click.argument('source_paths', required=True, nargs=-1)
-@click.option('-b', '--bucket', required=True, type=str)
+@click.argument('source_paths', required=False, nargs=-1)
+@click.option('-of', '--order', type=str)
+@click.option('-b', '--bucket', required=False, type=str)
 @click.option('-w', '--workers', default=8, type=int)
 @click.option('-ew', '--endswith', default='', type=str)
 @click.option('-vt', '--version-tag', default=None, type=str)
@@ -109,8 +152,9 @@ def s3put(dest_root: str, source_path: str, dryrun: bool, profile: Optional[str]
 @click.option('-db', '--debug', default=False, is_flag=True)
 
 
-def s3put_cli(source_paths, bucket, workers, endswith, version_tag, stage_tag,
+def s3put_cli(source_paths, order, bucket, workers, endswith, version_tag, stage_tag,
               developer_tag, project_tag, description_tag, profile, dryrun, verbose, debug):
+    mimetypes.init()
     LOGGER = colorlog.getLogger()
     if debug:
         LOGGER.setLevel(colorlog.colorlog.logging.DEBUG)
@@ -124,6 +168,12 @@ def s3put_cli(source_paths, bucket, workers, endswith, version_tag, stage_tag,
     HANDLER.setFormatter(colorlog.ColoredFormatter())
     LOGGER.addHandler(HANDLER)
 
+    if not order and not source_paths:
+        LOGGER.error("You must specify an order file or source path(s)")
+        sys.exit(-1)
+    if not order and not bucket:
+        LOGGER.error("You must specify an order file or a bucket")
+        sys.exit(-1)
     total = {'count': 0, 'size': 0, 'time': 0}
     tags = dict()
     if stage_tag:
@@ -131,19 +181,30 @@ def s3put_cli(source_paths, bucket, workers, endswith, version_tag, stage_tag,
     for tag in ['description', 'developer', 'project', 'stage', 'version']:
         if locals()[tag + '_tag']:
             tags[tag + '_tag'] = locals()[tag + '_tag']
-    for source_path in source_paths:
-        if len(source_paths) > 1:
-            print("Source " + source_path)
-        dest_root = Path(bucket) / Path(source_path).stem
-        result, source_count, source_size = s3put(dest_root, source_path, endswith=endswith,
-                                                  tags=tags, profile=profile, dryrun=dryrun)
-        total['count'] += source_count
-        total['size'] += source_size
+    if order:
+        result, source_count, source_size = s3put_order(order,tags=tags, profile=profile, dryrun=dryrun)
+        total['count'] = source_count
+        total['size'] = source_size
         if result:
             start_time = time()
             result.compute(scheduler='processes', num_workers=workers)
             elapsed_time = time() - start_time
-            total['time'] += elapsed_time
+            total['time'] = elapsed_time
+
+    else:
+        for source_path in source_paths:
+            if len(source_paths) > 1:
+                print("Source " + source_path)
+            dest_root = Path(bucket) / Path(source_path).stem
+            result, source_count, source_size = s3put(dest_root, source_path, endswith=endswith,
+                                                      tags=tags, profile=profile, dryrun=dryrun)
+            total['count'] += source_count
+            total['size'] += source_size
+            if result:
+                start_time = time()
+                result.compute(scheduler='processes', num_workers=workers)
+                elapsed_time = time() - start_time
+                total['time'] += elapsed_time
     if len(source_paths) >= 1:
         print("Total files: %d" % total['count'])
         print("Total size: %s" % humansize(total['size']))

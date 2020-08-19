@@ -1,6 +1,7 @@
 click 
 colorlog
 dask
+mimetypes
 pathlib
 s3fs
 typing
