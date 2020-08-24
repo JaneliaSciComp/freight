@@ -51,16 +51,19 @@ def upload_single_file(fs, source, dest, tag=None):
         sys.exit(-1)
     added = False
     tries = 5
+    mimetype = mimetypes.guess_type(source)[0]
+    if not mimetype:
+        mimetype = 'binary/octet-stream'
     while added is False and tries:
         try:
-            fs.setxattr(dest, copy_kwargs={'ContentType': mimetypes.guess_type(source)[0]})
+            fs.setxattr(dest, copy_kwargs={'ContentType': mimetype})
             added = True
         except Exception as err:
             print("Will retry setxattr for %s" % dest)
             tries -= 1
             sleep(2)
     if not added:
-        print("Could not setxattr for %s" % dest)
+        print("Could not setxattr to %s for %s" % (mimetype, dest))
         sys.exit(-1)
     if not tag:
         return
