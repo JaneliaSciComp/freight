@@ -50,7 +50,7 @@ def upload_single_file(fs, source, dest, tag=None):
         print("Could not put %s" % dest)
         sys.exit(-1)
     added = False
-    tries = 5
+    tries = 8
     mimetype = mimetypes.guess_type(source)[0]
     if not mimetype:
         mimetype = 'binary/octet-stream'
@@ -61,7 +61,7 @@ def upload_single_file(fs, source, dest, tag=None):
         except Exception as err:
             print("Will retry setxattr for %s" % dest)
             tries -= 1
-            sleep(2)
+            sleep(4)
     if not added:
         print("Could not setxattr to %s for %s" % (mimetype, dest))
         sys.exit(-1)
@@ -142,7 +142,7 @@ def s3put_order (order_file: str, dryrun: bool, profile: Optional[str] = None,
 @click.argument('source_paths', required=False, nargs=-1)
 @click.option('-of', '--order', type=str)
 @click.option('-b', '--bucket', required=False, type=str)
-@click.option('-w', '--workers', default=8, type=int)
+@click.option('-w', '--workers', default=12, type=int)
 @click.option('-ew', '--endswith', default='', type=str)
 @click.option('-vt', '--version-tag', default=None, type=str)
 @click.option('-st', '--stage-tag', default=None, type=str)
@@ -208,7 +208,7 @@ def s3put_cli(source_paths, order, bucket, workers, endswith, version_tag, stage
                 result.compute(scheduler='processes', num_workers=workers)
                 elapsed_time = time() - start_time
                 total['time'] += elapsed_time
-    if len(source_paths) >= 1:
+    if len(source_paths) >= 1 or order:
         print("Total files: %d" % total['count'])
         print("Total size: %s" % humansize(total['size']))
         if not dryrun:
