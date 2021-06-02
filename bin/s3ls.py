@@ -70,10 +70,11 @@ def list_path():
             fsize = obj['size']
             ftype = obj['type']
         size += fsize
-        if ARG.DETAIL:
-            print("\t".join([key, ftype, str(fsize)]))
-        else:
-            print(key)
+        if not ARG.GROUP:
+            if ARG.DETAIL:
+                print("\t".join([key, ftype, str(fsize)]))
+            else:
+                print(key)
     if ARG.GROUP:
         for key in sorted(group, key=str.lower):
             if group[key]['count'] <= 1:
