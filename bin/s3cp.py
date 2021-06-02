@@ -62,7 +62,7 @@ def humansize(num: int, suffix='B') -> str:
         Returns:
           string
     '''
-    for unit in ['', 'K', 'M', 'G', 'T']:
+    for unit in ['', 'Ki', 'Mi', 'Gi', 'Ti']:
         if abs(num) < 1024.0:
             return "%3.1f%s%s" % (num, unit, suffix)
         num /= 1024.0
