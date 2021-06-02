@@ -112,12 +112,12 @@ def upload_single_file(sfs, source, dest, tag=None):
             sfs.setxattr(dest, copy_kwargs={'ContentType': mimetype})
             added = True
         except Exception as err:
-            print("Will retry setxattr for %s" % dest)
             tries -= 1
             sleep(4)
     if not added:
-        print("Could not setxattr to %s for %s" % (mimetype, dest))
-        sys.exit(-1)
+        if mimetype != 'binary/octet-stream':
+            print("Could not setxattr to %s for %s" % (mimetype, dest))
+        return
     if not tag:
         return
     try:
