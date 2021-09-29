@@ -1,4 +1,4 @@
-''' Upload filed to or download objects from Amazon AWS S3
+''' Upload files to, download objects from, or remove objects from Amazon AWS S3
 '''
 
 import mimetypes
@@ -13,13 +13,13 @@ from dask import bag
 from dask.diagnostics import ProgressBar
 import s3fs
 
-__version__ = '1.0.0'
+__version__ = '1.1.0'
 # pylint: disable=broad-except, too-many-arguments, too-many-locals
 
 TEMPLATE = "An exception of type {0} occurred. Arguments:\n{1!r}"
 
 
-def check_parms(source_paths, order, bucket, download, basedir,
+def check_parms(source_paths, order, bucket, download, delete, basedir,
                 version_tag, stage_tag, developer_tag, project_tag,
                 description_tag, logger):
     ''' Check input parameters
@@ -28,6 +28,7 @@ def check_parms(source_paths, order, bucket, download, basedir,
           order_file: order file
           bucket: S3 bucket
           download: download flag
+          delete: delete flag
           basedir: local base directory
           version_tag: S3 tag for project version
           stage_tag: S3 tag for project stage
@@ -46,6 +47,8 @@ def check_parms(source_paths, order, bucket, download, basedir,
             msg = "You must specify a local base directory"
         if version_tag or stage_tag or developer_tag or project_tag or description_tag:
             msg = "Tags may only be used when uploading files"
+    elif delete and not order:
+        msg = "You must specify an order file"
     else:
         if not order and not bucket:
             msg = "You must specify an order file or a source path/bucket"
@@ -83,6 +86,22 @@ def download_single_file(sfs, source, dest):
     except Exception as err:
         print(TEMPLATE.format(type(err).__name__, err.args))
         print("Could not get %s" % source)
+        sys.exit(-1)
+
+
+def remove_single_file(sfs, source):
+    ''' Remove a single file
+        Keyword arguments:
+          sfs: S3FS connection
+          source: S3 bucket/key
+        Returns:
+          None
+    '''
+    try:
+        sfs.rm(source, False)
+    except Exception as err:
+        print(TEMPLATE.format(type(err).__name__, err.args))
+        print("Could not remove %s" % source)
         sys.exit(-1)
 
 
@@ -158,6 +177,20 @@ def iterget(sources: Sequence[str], dests: Sequence[str], profile):
     sfs = connect_s3(profile)
     for source, dest in zip(sources, dests):
         download_single_file(sfs, source, dest)
+    return True
+
+
+def iterrm(sources: Sequence[str], profile):
+    ''' Given a sequence of sources, remove each source object
+        Keyword arguments:
+          sources: sources
+          profile: user profile [optional]
+        Returns:
+          True
+    '''
+    sfs = connect_s3(profile)
+    for source in sources:
+        remove_single_file(sfs, source)
     return True
 
 
@@ -237,6 +270,31 @@ def s3get(source_paths: str, order_file: str, basedir: str, dryrun: bool,
     source_bag = bag.from_sequence(sources)
     dest_bag = bag.from_sequence(dests)
     return bag.map_partitions(iterget, source_bag, dest_bag, profile), \
+                              len(sources), total_size
+
+
+def s3rm(order_file: str, dryrun: bool,
+         profile: Optional[str] = None, **kwargs):
+    ''' Find objects to remove from S3
+        Keyword arguments:
+          order_file: order file
+          dryrun: do not upload
+          profile: user profile [optional]
+        Returns:
+          Dask bag
+    '''
+    sources = []
+    total_size = 0
+    order = open(order_file, "r")
+    for src in order.readlines():
+        src = src.rstrip()
+        sources.append(src)
+    order.close()
+    print("Files selected: %d" % (len(sources)))
+    if dryrun:
+        return None, len(sources), total_size
+    source_bag = bag.from_sequence(sources)
+    return bag.map_partitions(iterrm, source_bag, profile), \
                               len(sources), total_size
 
 
@@ -327,6 +385,29 @@ def s3put_order(order_file: str, dryrun: bool, profile: Optional[str] = None,
                               len(sources), total_size
 
 
+def execute_transfers(result, source_count, source_size, workers, source_paths, order):
+    ''' Interface with AWS S3 to upload/download files
+        Keyword arguments:
+          result: Dask bag
+          source_count: number of source objects
+          source_size: size of source objects
+          workers: number of workers
+          source_paths: local source path
+          order: order file
+        Returns:
+          None
+    '''
+
+    total = {'count': source_count, 'size': source_size, 'time': 0}
+    if result:
+        start_time = time()
+        result.compute(scheduler='processes', num_workers=workers)
+        total['time'] = time() - start_time
+    # Transfers complete
+    if len(source_paths) >= 1 or order:
+        print_stats(total)
+
+
 def print_stats(total):
     ''' Print statistics
         Keyword arguments:
@@ -347,6 +428,7 @@ def print_stats(total):
 @click.option('-b', '--bucket', required=False, type=str)
 @click.option('-w', '--workers', default=12, type=int)
 @click.option('-dl', '--download', default=False, is_flag=True)
+@click.option('-delete', '--delete', default=False, is_flag=True)
 @click.option('-base', '--basedir', type=str)
 @click.option('-ew', '--endswith', default='', type=str)
 @click.option('-vt', '--version-tag', default=None, type=str)
@@ -360,7 +442,7 @@ def print_stats(total):
 @click.option('-db', '--debug', default=False, is_flag=True)
 
 
-def s3_cli(source_paths, order, bucket, workers, download, basedir, endswith,
+def s3_cli(source_paths, order, bucket, workers, download, delete, basedir, endswith,
            version_tag, stage_tag, developer_tag, project_tag, description_tag,
            profile, dryrun, verbose, debug):
     ''' Interface with AWS S3 to upload/download files
@@ -370,6 +452,7 @@ def s3_cli(source_paths, order, bucket, workers, download, basedir, endswith,
           bucket: S3 bucket
           workers: number of workers [12]
           download: download flag
+          delete: delete flag
           basedir: local base directory
           endswith: ending string [optional]
           version_tag: S3 tag for project version
@@ -398,7 +481,7 @@ def s3_cli(source_paths, order, bucket, workers, download, basedir, endswith,
     handler.setFormatter(colorlog.ColoredFormatter())
     logger.addHandler(handler)
     # Parameter checking
-    check_parms(source_paths, order, bucket, download, basedir,
+    check_parms(source_paths, order, bucket, download, delete, basedir,
                 version_tag, stage_tag, developer_tag, project_tag, description_tag, logger)
     tags = dict()
     for tag in ['description', 'developer', 'project', 'stage', 'version']:
@@ -407,6 +490,8 @@ def s3_cli(source_paths, order, bucket, workers, download, basedir, endswith,
     if download:
         result, source_count, source_size = s3get(source_paths, order, basedir=basedir,
                                                   profile=profile, dryrun=dryrun)
+    elif delete:
+        result, source_count, source_size = s3rm(order, profile=profile, dryrun=dryrun)
     elif (not download) and source_paths:
         for source_path in source_paths:
             if len(source_paths) > 1:
@@ -417,14 +502,8 @@ def s3_cli(source_paths, order, bucket, workers, download, basedir, endswith,
     else:
         result, source_count, source_size = s3put_order(order, tags=tags, profile=profile,
                                                         dryrun=dryrun)
-    total = {'count': source_count, 'size': source_size, 'time': 0}
-    if result:
-        start_time = time()
-        result.compute(scheduler='processes', num_workers=workers)
-        total['time'] = time() - start_time
-    # Transfers complete
-    if len(source_paths) >= 1 or order:
-        print_stats(total)
+    # Run the transfers
+    execute_transfers(result, source_count, source_size, workers, source_paths, order)
 
 
 if __name__ == '__main__':
