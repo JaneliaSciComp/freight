@@ -1,7 +1,8 @@
+boto3
 click 
-colorlog
+colorlog <=4.0.2
 dask
-mimetypes
+mime
 pathlib
 s3fs
 typing

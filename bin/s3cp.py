@@ -7,19 +7,20 @@ from pathlib import Path
 import sys
 from time import sleep, time
 from typing import Sequence, Optional, Tuple, List
+import boto3
 import click
 import colorlog
 from dask import bag
 from dask.diagnostics import ProgressBar
 import s3fs
 
-__version__ = '1.1.0'
+__version__ = '1.2.0'
 # pylint: disable=broad-except, too-many-arguments, too-many-locals
 
 TEMPLATE = "An exception of type {0} occurred. Arguments:\n{1!r}"
 
 
-def check_parms(source_paths, order, bucket, download, delete, basedir,
+def check_parms(source_paths, order, bucket, download, delete, cloud, basedir,
                 version_tag, stage_tag, developer_tag, project_tag,
                 description_tag, logger):
     ''' Check input parameters
@@ -29,6 +30,7 @@ def check_parms(source_paths, order, bucket, download, delete, basedir,
           bucket: S3 bucket
           download: download flag
           delete: delete flag
+          cloud: cloud flag
           basedir: local base directory
           version_tag: S3 tag for project version
           stage_tag: S3 tag for project stage
@@ -48,7 +50,9 @@ def check_parms(source_paths, order, bucket, download, delete, basedir,
         if version_tag or stage_tag or developer_tag or project_tag or description_tag:
             msg = "Tags may only be used when uploading files"
     elif delete and not order:
-        msg = "You must specify an order file"
+        msg = "You must specify an order file with --delete"
+    elif cloud and not order:
+        msg = "You must specify an order file with --cloud"
     else:
         if not order and not bucket:
             msg = "You must specify an order file or a source path/bucket"
@@ -147,6 +151,28 @@ def upload_single_file(sfs, source, dest, tag=None):
         sys.exit(-1)
 
 
+def copy_single_file(s3r, source, dest):
+    ''' Copy a single file
+        Keyword arguments:
+          s3r: S3 resource
+          source: source file
+          dest: S3 bucket/key
+        Returns:
+          None
+    '''
+    bucket, from_key = source.split("/", 1)
+    copy_source = {'Bucket': bucket,
+                   'Key': from_key}
+    bucket, to_key = dest.split("/", 1)
+    try:
+        bucket = s3r.Bucket(bucket)
+        bucket.copy(copy_source, to_key)
+    except Exception as err:
+        print(TEMPLATE.format(type(err).__name__, err.args))
+        print("Could not put %s" % dest)
+        sys.exit(-1)
+
+
 def connect_s3(profile):
     ''' Connect an S3 filesystem
         Keyword arguments:
@@ -163,6 +189,25 @@ def connect_s3(profile):
         print(TEMPLATE.format(type(err).__name__, err.args))
         sys.exit(-1)
     return sfs
+
+
+def connect_s3_boto(profile):
+    ''' Connect an S3 filesystem
+        Keyword arguments:
+          profile: user profile [optional]
+        Returns:
+          S3 resource
+    '''
+    try:
+        if profile:
+            session = boto3.session.Session(profile_name=profile)
+        else:
+            session = boto3.session.Session()
+        s3r = session.resource('s3')
+    except Exception as err:
+        print(TEMPLATE.format(type(err).__name__, err.args))
+        sys.exit(-1)
+    return s3r
 
 
 def iterget(sources: Sequence[str], dests: Sequence[str], profile):
@@ -214,6 +259,21 @@ def iterput(sources: Sequence[str], dests: Sequence[str], tags: Sequence[Optiona
     return True
 
 
+def itercloud(sources: Sequence[str], dests: Sequence[str], profile):
+    ''' Given a sequence of sources, dests, and tags, save each source to dest with a tag
+        Keyword arguments:
+          sources: sources
+          dests: destinations
+          profile: user profile [optional]
+        Returns:
+          True
+    '''
+    s3r = connect_s3_boto(profile)
+    for source, dest in zip(sources, dests):
+        copy_single_file(s3r, source, dest)
+    return True
+
+
 def walk_s3_path(s3_path, profile):
     ''' Recursively walk a path in S3 to return objects
         Keyword arguments:
@@ -233,6 +293,21 @@ def walk_s3_path(s3_path, profile):
     return source_objs, osize
 
 
+def check_columns(line, require):
+    ''' Check a line for the required number of columns
+        Keyword arguments:
+          line: line from file
+          require: required number of columns
+        Returns:
+          True or False
+    '''
+    columns = len(line.split("\t"))
+    if columns != require:
+        print("Order file requires %d column(s), but has %d" % (require, columns))
+        return False
+    return True
+
+
 def s3get(source_paths: str, order_file: str, basedir: str, dryrun: bool,
           profile: Optional[str] = None, **kwargs):
     ''' Find objects to download from S3
@@ -250,8 +325,13 @@ def s3get(source_paths: str, order_file: str, basedir: str, dryrun: bool,
     total_size = 0
     if order_file:
         order = open(order_file, "r")
+        checked = False
         for src in order.readlines():
             src = src.rstrip()
+            if not checked:
+                if not check_columns(src, 1):
+                    sys.exit(-1)
+                checked = True
             sources.append(src)
             dests.append(src.replace(src.split('/')[0], basedir))
         order.close()
@@ -285,9 +365,14 @@ def s3rm(order_file: str, dryrun: bool,
     '''
     sources = []
     total_size = 0
+    checked = False
     order = open(order_file, "r")
     for src in order.readlines():
         src = src.rstrip()
+        if not checked:
+            if not check_columns(src, 1):
+                sys.exit(-1)
+            checked = True
         sources.append(src)
     order.close()
     print("Files selected: %d" % (len(sources)))
@@ -351,7 +436,7 @@ def s3put(dest_root: str, source_path: str, dryrun: bool, profile: Optional[str]
                               len(sources), total_size
 
 
-def s3put_order(order_file: str, dryrun: bool, profile: Optional[str] = None,
+def s3put_order(order_file: str, dryrun: bool, cloud: bool, profile: Optional[str] = None,
                 tags: Optional[dict] = None, **kwargs):
     ''' Find local files to upload to S3 from an order file
         Keyword arguments:
@@ -365,22 +450,32 @@ def s3put_order(order_file: str, dryrun: bool, profile: Optional[str] = None,
     '''
     sources = []
     dests = []
+    checked = False
     order = open(order_file, "r")
     total_size = 0
     for line in order.readlines():
         line = line.rstrip()
+        if not checked:
+            if not check_columns(line, 2):
+                sys.exit(-1)
+            checked = True
         src, dst = line.split("\t")
-        total_size += os.stat(src).st_size
+        if not cloud:
+            total_size += os.stat(src).st_size
         sources.append(src)
         dests.append(dst)
     order.close()
     print("Files selected: %d" % (len(sources)))
-    print("Size: %s" % humansize(total_size))
+    if not cloud:
+        print("Size: %s" % humansize(total_size))
     if dryrun:
         return None, len(sources), total_size
     source_bag = bag.from_sequence(sources)
     dest_bag = bag.from_sequence(dests)
     tag_bag = bag.from_sequence((tags,) * len(sources)) if tags else None
+    if cloud:
+        return bag.map_partitions(itercloud, source_bag, dest_bag, profile), \
+                                  len(sources), total_size
     return bag.map_partitions(iterput, source_bag, dest_bag, tag_bag, profile), \
                               len(sources), total_size
 
@@ -429,6 +524,7 @@ def print_stats(total):
 @click.option('-w', '--workers', default=12, type=int)
 @click.option('-dl', '--download', default=False, is_flag=True)
 @click.option('-delete', '--delete', default=False, is_flag=True)
+@click.option('-cl', '--cloud', default=False, is_flag=True)
 @click.option('-base', '--basedir', type=str)
 @click.option('-ew', '--endswith', default='', type=str)
 @click.option('-vt', '--version-tag', default=None, type=str)
@@ -442,7 +538,7 @@ def print_stats(total):
 @click.option('-db', '--debug', default=False, is_flag=True)
 
 
-def s3_cli(source_paths, order, bucket, workers, download, delete, basedir, endswith,
+def s3_cli(source_paths, order, bucket, workers, download, delete, cloud, basedir, endswith,
            version_tag, stage_tag, developer_tag, project_tag, description_tag,
            profile, dryrun, verbose, debug):
     ''' Interface with AWS S3 to upload/download files
@@ -453,6 +549,7 @@ def s3_cli(source_paths, order, bucket, workers, download, delete, basedir, ends
           workers: number of workers [12]
           download: download flag
           delete: delete flag
+          cloud: cloud-to-cloud transfer
           basedir: local base directory
           endswith: ending string [optional]
           version_tag: S3 tag for project version
@@ -481,7 +578,7 @@ def s3_cli(source_paths, order, bucket, workers, download, delete, basedir, ends
     handler.setFormatter(colorlog.ColoredFormatter())
     logger.addHandler(handler)
     # Parameter checking
-    check_parms(source_paths, order, bucket, download, delete, basedir,
+    check_parms(source_paths, order, bucket, download, delete, cloud, basedir,
                 version_tag, stage_tag, developer_tag, project_tag, description_tag, logger)
     tags = dict()
     for tag in ['description', 'developer', 'project', 'stage', 'version']:
@@ -501,7 +598,7 @@ def s3_cli(source_paths, order, bucket, workers, download, delete, basedir, ends
                                                       tags=tags, profile=profile, dryrun=dryrun)
     else:
         result, source_count, source_size = s3put_order(order, tags=tags, profile=profile,
-                                                        dryrun=dryrun)
+                                                        dryrun=dryrun, cloud=cloud)
     # Run the transfers
     execute_transfers(result, source_count, source_size, workers, source_paths, order)
 
