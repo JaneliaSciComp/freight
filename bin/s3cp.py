@@ -11,27 +11,28 @@ import boto3
 import click
 import colorlog
 from dask import bag
-from dask.callbacks import Callback
-from tqdm.auto import tqdm
+from dask.diagnostics import ProgressBar
+#from dask.callbacks import Callback
+#from tqdm.auto import tqdm
 import s3fs
 
-__version__ = '1.3.0'
+__version__ = '1.4.0'
 # pylint: disable=broad-except, too-many-arguments, too-many-locals
 
 TEMPLATE = "An exception of type {0} occurred. Arguments:\n{1!r}"
 
 
-class ProgressBar(Callback):
-    def _start_state(self, dsk, state):
-        self._tqdm = tqdm(total=sum(len(state[k]) for k in ['ready', 'waiting',
-                                                            'running', 'finished']),
-                          colour='green')
-
-    def _posttask(self, key, result, dsk, state, worker_id):
-        self._tqdm.update(1)
-
-    def _finish(self, dsk, state, errored):
-        pass
+#class ProgressBar(Callback):
+#    def _start_state(self, dsk, state):
+#        self._tqdm = tqdm(total=sum(len(state[k]) for k in ['ready', 'waiting',
+#                                                            'running', 'finished']),
+#                          colour='green')
+#
+#    def _posttask(self, key, result, dsk, state, worker_id):
+#        self._tqdm.update(1)
+#
+#    def _finish(self, dsk, state, errored):
+#        pass
 
 
 def check_parms(source_paths, order, bucket, download, delete, cloud, basedir,
