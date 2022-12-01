@@ -11,28 +11,14 @@ import boto3
 import click
 import colorlog
 from dask import bag
-from dask.diagnostics import ProgressBar
-#from dask.callbacks import Callback
-#from tqdm.auto import tqdm
+from dask.diagnostics import ProgressBar, Profiler, ResourceProfiler, CacheProfiler, visualize
+from dask.distributed import Client
 import s3fs
 
 __version__ = '1.4.0'
 # pylint: disable=broad-except, too-many-arguments, too-many-locals
 
 TEMPLATE = "An exception of type {0} occurred. Arguments:\n{1!r}"
-
-
-#class ProgressBar(Callback):
-#    def _start_state(self, dsk, state):
-#        self._tqdm = tqdm(total=sum(len(state[k]) for k in ['ready', 'waiting',
-#                                                            'running', 'finished']),
-#                          colour='green')
-#
-#    def _posttask(self, key, result, dsk, state, worker_id):
-#        self._tqdm.update(1)
-#
-#    def _finish(self, dsk, state, errored):
-#        pass
 
 
 def check_parms(source_paths, order, bucket, download, delete, cloud, basedir,
@@ -467,7 +453,7 @@ def s3put_order(order_file: str, dryrun: bool, cloud: bool, profile: Optional[st
     dests = []
     checked = False
     order = open(order_file, "r")
-    total_size = 0
+    total_size = total_skipped = 0
     for line in order.readlines():
         line = line.rstrip()
         if not checked:
@@ -476,11 +462,17 @@ def s3put_order(order_file: str, dryrun: bool, cloud: bool, profile: Optional[st
             checked = True
         src, dst = line.split("\t")
         if not cloud:
+            if not os.path.exists(src):
+                print(src)
+                total_skipped += 1
+                continue
             total_size += os.stat(src).st_size
         sources.append(src)
         dests.append(dst)
     order.close()
     print("Files selected: %d" % (len(sources)))
+    if total_skipped:
+        print("Files skipped: %d" % total_skipped)
     if not cloud:
         print("Size: %s" % humansize(total_size))
     if dryrun:
@@ -495,7 +487,7 @@ def s3put_order(order_file: str, dryrun: bool, cloud: bool, profile: Optional[st
                               len(sources), total_size
 
 
-def execute_transfers(result, source_count, source_size, workers, source_paths, order):
+def execute_transfers(result, source_count, source_size, workers, source_paths, order, diagnostics):
     ''' Interface with AWS S3 to upload/download files
         Keyword arguments:
           result: Dask bag
@@ -504,6 +496,7 @@ def execute_transfers(result, source_count, source_size, workers, source_paths, 
           workers: number of workers
           source_paths: local source path
           order: order file
+          diagnostics: show profile diagnostic
         Returns:
           None
     '''
@@ -511,11 +504,17 @@ def execute_transfers(result, source_count, source_size, workers, source_paths, 
     total = {'count': source_count, 'size': source_size, 'time': 0}
     if result:
         start_time = time()
-        result.compute(scheduler='processes', num_workers=workers)
+        if diagnostics:
+            with Profiler() as prof, ResourceProfiler(dt=0.25) as rprof, CacheProfiler() as cprof:
+                result.compute(scheduler='processes', num_workers=workers)
+        else:
+            result.compute(scheduler='processes', num_workers=workers)
         total['time'] = time() - start_time
     # Transfers complete
     if len(source_paths) >= 1 or order:
         print_stats(total)
+    if diagnostics:
+        visualize([prof, rprof, cprof])
 
 
 def print_stats(total):
@@ -549,13 +548,14 @@ def print_stats(total):
 @click.option('-dt', '--description-tag', default=None, type=str)
 @click.option('-pr', '--profile', default=None, type=str)
 @click.option('-dr', '--dryrun', default=False, is_flag=True)
+@click.option('-di', '--diagnostics', default=False, is_flag=True)
 @click.option('-vb', '--verbose', default=False, is_flag=True)
 @click.option('-db', '--debug', default=False, is_flag=True)
 
 
 def s3_cli(source_paths, order, bucket, workers, download, delete, cloud, basedir, endswith,
            version_tag, stage_tag, developer_tag, project_tag, description_tag,
-           profile, dryrun, verbose, debug):
+           profile, dryrun, diagnostics, verbose, debug):
     ''' Interface with AWS S3 to upload/download files
         Keyword arguments:
           source_paths: local source path
@@ -574,6 +574,7 @@ def s3_cli(source_paths, order, bucket, workers, download, delete, cloud, basedi
           description_tag: S3 tag for project description
           profile: user profile [optional]
           dryrun: do not upload
+          diagnostics: show profile diagnostic after run is complete
           verbose: verbose mode (program is chatty)
           debug: debug mode (program is very chatty)
         Returns:
@@ -615,7 +616,7 @@ def s3_cli(source_paths, order, bucket, workers, download, delete, cloud, basedi
         result, source_count, source_size = s3put_order(order, tags=tags, profile=profile,
                                                         dryrun=dryrun, cloud=cloud)
     # Run the transfers
-    execute_transfers(result, source_count, source_size, workers, source_paths, order)
+    execute_transfers(result, source_count, source_size, workers, source_paths, order, diagnostics)
 
 
 if __name__ == '__main__':
@@ -624,4 +625,5 @@ if __name__ == '__main__':
         sys.exit(-1)
     PBAR = ProgressBar()
     PBAR.register()
+    client = Client()
     s3_cli() # pylint: disable=no-value-for-parameter
