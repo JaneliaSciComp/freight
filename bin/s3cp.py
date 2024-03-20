@@ -15,7 +15,7 @@ from dask.diagnostics import ProgressBar, Profiler, ResourceProfiler, CacheProfi
 from dask.distributed import Client
 import s3fs
 
-__version__ = '1.4.0'
+__version__ = '1.4.1'
 # pylint: disable=broad-except, too-many-arguments, too-many-locals
 
 TEMPLATE = "An exception of type {0} occurred. Arguments:\n{1!r}"
@@ -527,6 +527,9 @@ def print_stats(total):
     print("Total files: %d" % total['count'])
     if total['size']:
         print("Total size: %s" % humansize(total['size']))
+        if not total['time']:
+            total['time'] = .1
+            total['size'] = 0
         print("Data transfer rate: %.2f MB/sec"
               % (total['size'] / total['time'] / (1024 * 1024)))
 
@@ -583,13 +586,13 @@ def s3_cli(source_paths, order, bucket, workers, download, delete, cloud, basedi
     mimetypes.init()
     logger = colorlog.getLogger()
     if debug:
-        logger.setLevel(colorlog.colorlog.logging.DEBUG)
+        logger.setLevel(colorlog.DEBUG)
         verbose = True
         os.environ['S3FS_LOGGING_LEVEL'] = "DEBUG"
     elif verbose:
-        logger.setLevel(colorlog.colorlog.logging.INFO)
+        logger.setLevel(colorlog.INFO)
     else:
-        logger.setLevel(colorlog.colorlog.logging.WARNING)
+        logger.setLevel(colorlog.WARNING)
     handler = colorlog.StreamHandler()
     handler.setFormatter(colorlog.ColoredFormatter())
     logger.addHandler(handler)
