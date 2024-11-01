@@ -121,7 +121,7 @@ def upload_single_file(sfs, source, dest, tag=None):
           None
     '''
     try:
-        sfs.put(source, dest)
+        sfs.put(source, str(dest))
     except Exception as err:
         print(TEMPLATE.format(type(err).__name__, err.args))
         print("Could not put %s" % dest)
